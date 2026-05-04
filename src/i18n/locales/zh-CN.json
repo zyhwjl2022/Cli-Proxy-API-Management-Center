@@ -528,6 +528,8 @@
     "sort_default": "默认",
     "sort_az": "A-Z 名称",
     "sort_priority": "优先级",
+    "sort_lifetime_desc": "存活时间（大到小）",
+    "sort_subscription_asc": "订阅剩余时间（小到大）",
     "priority_display": "优先级",
     "page_size_label": "单页数量",
     "page_size_unit": "个/页",

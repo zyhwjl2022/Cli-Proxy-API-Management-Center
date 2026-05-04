@@ -528,6 +528,8 @@
     "sort_default": "Default",
     "sort_az": "A-Z Name",
     "sort_priority": "Priority",
+    "sort_lifetime_desc": "Lifetime (High to Low)",
+    "sort_subscription_asc": "Subscription Remaining (Low to High)",
     "priority_display": "Priority",
     "page_size_label": "Per page",
     "page_size_unit": "items",

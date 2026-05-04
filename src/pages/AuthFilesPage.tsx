@@ -39,6 +39,7 @@ import {
   type QuotaProviderType,
   type ResolvedTheme,
 } from '@/features/authFiles/constants';
+import { parseTimestampMs } from '@/utils/timestamp';
 import { AuthFileCard } from '@/features/authFiles/components/AuthFileCard';
 import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileModelsModal';
 import { AuthFilesPrefixProxyEditorModal } from '@/features/authFiles/components/AuthFilesPrefixProxyEditorModal';
@@ -74,6 +75,18 @@ const buildWildcardSearch = (value: string): RegExp | null => {
   if (!value.includes('*')) return null;
   const pattern = value.split('*').map(escapeWildcardSearchSegment).join('.*');
   return new RegExp(pattern, 'i');
+};
+
+const getLifetimeSortValue = (value: unknown): number => {
+  const timestampMs = parseTimestampMs(value);
+  if (!Number.isFinite(timestampMs)) return Number.NEGATIVE_INFINITY;
+  return Date.now() - timestampMs;
+};
+
+const getSubscriptionRemainingSortValue = (value: unknown): number => {
+  const timestampMs = parseTimestampMs(value);
+  if (!Number.isFinite(timestampMs)) return 0;
+  return Math.max(0, timestampMs - Date.now());
 };
 
 export function AuthFilesPage() {
@@ -371,6 +384,8 @@ export function AuthFilesPage() {
       { value: 'default', label: t('auth_files.sort_default') },
       { value: 'az', label: t('auth_files.sort_az') },
       { value: 'priority', label: t('auth_files.sort_priority') },
+      { value: 'lifetime-desc', label: t('auth_files.sort_lifetime_desc') },
+      { value: 'subscription-asc', label: t('auth_files.sort_subscription_asc') },
     ],
     [t]
   );
@@ -420,7 +435,29 @@ export function AuthFilesPage() {
       copy.sort((a, b) => {
         const pa = parsePriorityValue(a.priority ?? a['priority']) ?? 0;
         const pb = parsePriorityValue(b.priority ?? b['priority']) ?? 0;
-        return pb - pa; // 高优先级排前面
+        return pb - pa;
+      });
+    } else if (sortMode === 'lifetime-desc') {
+      copy.sort((a, b) => {
+        const diff = getLifetimeSortValue(b['created_at']) - getLifetimeSortValue(a['created_at']);
+        if (diff !== 0) return diff;
+        return a.name.localeCompare(b.name);
+      });
+    } else if (sortMode === 'subscription-asc') {
+      copy.sort((a, b) => {
+        const idTokenA =
+          a.id_token && typeof a.id_token === 'object' && !Array.isArray(a.id_token)
+            ? (a.id_token as Record<string, unknown>)
+            : null;
+        const idTokenB =
+          b.id_token && typeof b.id_token === 'object' && !Array.isArray(b.id_token)
+            ? (b.id_token as Record<string, unknown>)
+            : null;
+        const diff =
+          getSubscriptionRemainingSortValue(idTokenA?.chatgpt_subscription_active_until) -
+          getSubscriptionRemainingSortValue(idTokenB?.chatgpt_subscription_active_until);
+        if (diff !== 0) return diff;
+        return a.name.localeCompare(b.name);
       });
     }
     return copy;

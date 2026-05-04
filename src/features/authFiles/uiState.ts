@@ -1,4 +1,10 @@
-export const AUTH_FILES_SORT_MODES = ['default', 'az', 'priority'] as const;
+export const AUTH_FILES_SORT_MODES = [
+  'default',
+  'az',
+  'priority',
+  'lifetime-desc',
+  'subscription-asc',
+] as const;
 
 export type AuthFilesSortMode = (typeof AUTH_FILES_SORT_MODES)[number];
 

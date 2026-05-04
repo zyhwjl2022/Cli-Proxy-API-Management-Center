@@ -528,6 +528,8 @@
     "sort_default": "По умолчанию",
     "sort_az": "A-Z Имя",
     "sort_priority": "Приоритет",
+    "sort_lifetime_desc": "Срок жизни (по убыванию)",
+    "sort_subscription_asc": "Остаток подписки (по возрастанию)",
     "priority_display": "Приоритет",
     "page_size_label": "На странице",
     "page_size_unit": "элементов",
