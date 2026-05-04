@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useInterval } from '@/hooks/useInterval';
 import { Button } from '@/components/ui/Button';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
@@ -11,15 +13,16 @@ import {
   IconTrash2,
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
+import { authFilesApi } from '@/services/api';
 import type { AuthFileItem } from '@/types';
 import { resolveAuthProvider } from '@/utils/quota';
+import { parseTimestampMs } from '@/utils/timestamp';
 import {
   normalizeRecentRequestAuthIndex,
   normalizeRecentRequestBuckets,
   normalizeUsageTotal,
   statusBarDataFromRecentRequests,
 } from '@/utils/recentRequests';
-import { formatFileSize } from '@/utils/format';
 import {
   QUOTA_PROVIDER_TYPES,
   formatModified,
@@ -37,6 +40,102 @@ import { AuthFileQuotaSection } from '@/features/authFiles/components/AuthFileQu
 import styles from '@/pages/AuthFilesPage.module.scss';
 
 const HEALTHY_STATUS_MESSAGES = new Set(['ok', 'healthy', 'ready', 'success', 'available']);
+const TOKEN_REMAINING_REFRESH_MS = 60_000;
+const authFileTokenInfoCache = new Map<string, AtRemainingState>();
+
+type AtRemainingState = {
+  expiresAtMs: number | null;
+  loading: boolean;
+};
+
+type IdTokenPayload = {
+  chatgpt_subscription_active_until?: unknown;
+};
+
+const readRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+const formatDurationFromSeconds = (seconds: number): string => {
+  if (!Number.isFinite(seconds)) return '-';
+  if (seconds <= 0) return '0m';
+
+  const totalSeconds = Math.floor(seconds);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return '<1m';
+};
+
+const getRemainingSecondsFromTimestamp = (value: unknown): number => {
+  const targetMs = parseTimestampMs(value);
+  if (!Number.isFinite(targetMs)) return -1;
+  return (targetMs - Date.now()) / 1000;
+};
+
+const getElapsedSecondsFromTimestamp = (value: unknown): number => {
+  const targetMs = parseTimestampMs(value);
+  if (!Number.isFinite(targetMs)) return -1;
+  return Math.max(0, (Date.now() - targetMs) / 1000);
+};
+
+const decodeJwtPayload = (token: string): Record<string, unknown> | null => {
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+
+  try {
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    const decoded = atob(padded);
+    const utf8 = decodeURIComponent(
+      Array.from(decoded)
+        .map((char) => `%${char.charCodeAt(0).toString(16).padStart(2, '0')}`)
+        .join('')
+    );
+    const parsed = JSON.parse(utf8) as unknown;
+    return readRecord(parsed);
+  } catch {
+    return null;
+  }
+};
+
+const getTokenExpiryMs = (accessToken: string): number | null => {
+  const payload = decodeJwtPayload(accessToken.trim());
+  if (!payload) return null;
+
+  const exp = payload.exp;
+  if (typeof exp === 'number' && Number.isFinite(exp)) {
+    return exp * 1000;
+  }
+  if (typeof exp === 'string' && exp.trim()) {
+    const asNumber = Number(exp.trim());
+    if (Number.isFinite(asNumber)) {
+      return asNumber * 1000;
+    }
+  }
+
+  return null;
+};
+
+const getAtRemainingExpiryMs = (tokenData: Record<string, unknown>): number | null => {
+  const expiredStr = typeof tokenData.expired === 'string' ? tokenData.expired.trim() : '';
+  if (expiredStr) {
+    const expiresAtMs = parseTimestampMs(expiredStr);
+    if (Number.isFinite(expiresAtMs)) {
+      return expiresAtMs;
+    }
+  }
+
+  const accessToken = typeof tokenData.access_token === 'string' ? tokenData.access_token.trim() : '';
+  if (accessToken) {
+    return getTokenExpiryMs(accessToken);
+  }
+
+  return null;
+};
 
 export type AuthFileCardProps = {
   file: AuthFileItem;
@@ -123,6 +222,71 @@ export function AuthFileCard(props: AuthFileCardProps) {
 
   const priorityValue = parsePriorityValue(file.priority ?? file['priority']);
   const noteValue = typeof file.note === 'string' ? file.note.trim() : '';
+  const [timeTick, setTimeTick] = useState(0);
+  const [atRemaining, setAtRemaining] = useState<AtRemainingState>(() =>
+    authFileTokenInfoCache.get(file.name) ?? { expiresAtMs: null, loading: false }
+  );
+  useInterval(() => {
+    setTimeTick((value: number) => value + 1);
+  }, TOKEN_REMAINING_REFRESH_MS);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = authFileTokenInfoCache.get(file.name);
+    if (cached) {
+      setAtRemaining(cached);
+    } else {
+      setAtRemaining({ expiresAtMs: null, loading: false });
+    }
+
+    if (cached?.loading) return;
+
+    const loadAtRemaining = async () => {
+      const nextLoadingState = { expiresAtMs: cached?.expiresAtMs ?? null, loading: true };
+      authFileTokenInfoCache.set(file.name, nextLoadingState);
+      if (!cancelled) setAtRemaining(nextLoadingState);
+
+      try {
+        const payload = await authFilesApi.downloadJsonObject(file.name);
+        const nextState = {
+          expiresAtMs: getAtRemainingExpiryMs(payload),
+          loading: false,
+        };
+        authFileTokenInfoCache.set(file.name, nextState);
+        if (!cancelled) setAtRemaining(nextState);
+      } catch {
+        const nextState = { expiresAtMs: null, loading: false };
+        authFileTokenInfoCache.set(file.name, nextState);
+        if (!cancelled) setAtRemaining(nextState);
+      }
+    };
+
+    void loadAtRemaining();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [file.name]);
+
+  const lifetimeLabel = (() => {
+    void timeTick;
+    return formatDurationFromSeconds(getElapsedSecondsFromTimestamp(file['created_at']));
+  })();
+
+  const subscriptionRemainingLabel = (() => {
+    void timeTick;
+    const idToken = readRecord(file.id_token) as IdTokenPayload | null;
+    return formatDurationFromSeconds(
+      getRemainingSecondsFromTimestamp(idToken?.chatgpt_subscription_active_until)
+    );
+  })();
+
+  const atRemainingLabel = (() => {
+    void timeTick;
+    if (atRemaining.loading) return '...';
+    if (!Number.isFinite(atRemaining.expiresAtMs ?? Number.NaN)) return '-';
+    return formatDurationFromSeconds(((atRemaining.expiresAtMs as number) - Date.now()) / 1000);
+  })();
   const stateLabel = isRuntimeOnly
     ? t('auth_files.type_virtual') || '虚拟认证文件'
     : file.disabled
@@ -202,14 +366,20 @@ export function AuthFileCard(props: AuthFileCardProps) {
 
           <div className={`${styles.cardMeta} ${compact ? styles.cardMetaCompact : ''}`}>
             <div className={styles.metaItem}>
-              <span className={styles.metaLabel}>{t('auth_files.file_size')}</span>
-              <span className={styles.metaValue}>
-                {file.size ? formatFileSize(file.size) : '-'}
-              </span>
-            </div>
-            <div className={styles.metaItem}>
               <span className={styles.metaLabel}>{t('auth_files.file_modified')}</span>
               <span className={styles.metaValue}>{formatModified(file)}</span>
+            </div>
+            <div className={styles.metaItem}>
+              <span className={styles.metaLabel}>{t('auth_files.file_lifetime')}</span>
+              <span className={styles.metaValue}>{lifetimeLabel}</span>
+            </div>
+            <div className={styles.metaItem}>
+              <span className={styles.metaLabel}>{t('auth_files.subscription_remaining')}</span>
+              <span className={styles.metaValue}>{subscriptionRemainingLabel}</span>
+            </div>
+            <div className={styles.metaItem}>
+              <span className={styles.metaLabel}>{t('auth_files.at_remaining')}</span>
+              <span className={styles.metaValue}>{atRemainingLabel}</span>
             </div>
             {priorityValue !== undefined && (
               <div className={`${styles.metaItem} ${styles.priorityBadge}`}>
